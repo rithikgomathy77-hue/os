@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>User–Kernel Mode Switching Simulator</title>
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --bg: #0a0c10;
+      --surface: #111318;
+      --surface2: #181b22;
+      --surface3: #1e2129;
+      --border: #2a2e3a;
+      --border-glow: #3b82f6;
+      --user-color: #22d3ee;
+      --user-dim: #0e4f5c;
+      --kernel-color: #f97316;
+      --kernel-dim: #5c2e0e;
+      --success: #4ade80;
+      --error: #f87171;
+      --warn: #facc15;
+      --text: #e2e8f0;
+      --text-muted: #64748b;
+      --text-dim: #334155;
+      --mono: 'Share Tech Mono', monospace;
+      --sans: 'Syne', sans-serif;
+      --transition: 0.35s cubic-bezier(0.4,0,0.2,1);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ─── scanline overlay ─── */
+    body::before {
+      content: '';
+      pointer-events: none;
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.04) 2px, rgba(0,0,0,0.04) 4px);
+      z-index: 1000;
+    }
+
+    header {
+      padding: 2rem 2.5rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: flex-end;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+    }
+
+    .header-badge {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      padding: 4px 10px;
+      border-radius: 4px;
+      background: var(--surface);
+    }
+
+    h1 {
+      font-size: clamp(1.4rem, 3vw, 2rem);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+    }
+
+    h1 span.user-hl  { color: var(--user-color); }
+    h1 span.kern-hl  { color: var(--kernel-color); }
+
+    .subtitle {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 4px;
+      font-weight: 400;
+    }
+
+    /* ─── main grid ─── */
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      grid-template-rows: auto auto;
+      gap: 1.5px;
+      background: var(--border);
+      min-height: calc(100vh - 100px);
+    }
+
+    .panel {
+      background: var(--surface);
+      padding: 1.25rem 1.5rem;
+    }
+
+    .panel-title {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .panel-title::before {
+      content: '';
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    /* ─── MODE INDICATOR ─── */
+    .mode-strip {
+      grid-column: 1 / -1;
+      background: var(--surface2);
+      padding: 0;
+      display: flex;
+      align-items: stretch;
+      overflow: hidden;
+    }
+
+    .mode-half {
+      flex: 1;
+      padding: 1rem 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      transition: background var(--transition);
+    }
+
+    .mode-half.active-user   { background: rgba(34,211,238,0.07); border-bottom: 2px solid var(--user-color); }
+    .mode-half.active-kernel { background: rgba(249,115,22,0.07);  border-bottom: 2px solid var(--kernel-color); }
+    .mode-half.inactive      { border-bottom: 2px solid transparent; }
+
+    .mode-dot {
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      border: 2px solid;
+      flex-shrink: 0;
+      transition: box-shadow var(--transition), background var(--transition);
+    }
+
+    .mode-dot.user   { border-color: var(--user-color); }
+    .mode-dot.kernel { border-color: var(--kernel-color); }
+    .mode-dot.lit.user   { background: var(--user-color);   box-shadow: 0 0 12px var(--user-color); }
+    .mode-dot.lit.kernel { background: var(--kernel-color); box-shadow: 0 0 12px var(--kernel-color); }
+
+    .mode-label {
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: 0.05em;
+    }
+
+    .mode-label.user   { color: var(--user-color); }
+    .mode-label.kernel { color: var(--kernel-color); }
+
+    .mode-desc {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: var(--mono);
+    }
+
+    .mode-ring-0, .mode-ring-3 {
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 3px;
+      margin-left: auto;
+    }
+
+    .mode-ring-3 { background: rgba(34,211,238,0.12); color: var(--user-color); }
+    .mode-ring-0 { background: rgba(249,115,22,0.12);  color: var(--kernel-color); }
+
+    /* divider arrow */
+    .mode-arrow {
+      width: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      color: var(--text-dim);
+      background: var(--surface2);
+      flex-shrink: 0;
+    }
+
+    /* ─── VISUALIZATION ─── */
+    #vis-panel {
+      grid-row: 2;
+      grid-column: 1;
+    }
+
+    .arch-container {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .arch-layer {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .arch-layer::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 3px;
+      border-radius: 4px 0 0 4px;
+      transition: background var(--transition);
+    }
+
+    .arch-layer.user-layer::before  { background: var(--user-dim); }
+    .arch-layer.kernel-layer::before { background: var(--kernel-dim); }
+
+    .arch-layer.active.user-layer {
+      border-color: var(--user-color);
+      background: rgba(34,211,238,0.05);
+      box-shadow: 0 0 20px rgba(34,211,238,0.1);
+    }
+
+    .arch-layer.active.user-layer::before { background: var(--user-color); }
+
+    .arch-layer.active.kernel-layer {
+      border-color: var(--kernel-color);
+      background: rgba(249,115,22,0.05);
+      box-shadow: 0 0 20px rgba(249,115,22,0.1);
+    }
+
+    .arch-layer.active.kernel-layer::before { background: var(--kernel-color); }
+
+    .arch-icon {
+      font-size: 20px;
+      width: 32px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    .arch-name {
+      font-weight: 600;
+      font-size: 14px;
+      min-width: 130px;
+    }
+
+    .arch-desc {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: var(--mono);
+      flex: 1;
+    }
+
+    .arch-priv {
+      font-family: var(--mono);
+      font-size: 10px;
+      padding: 2px 7px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+
+    .arch-priv.usr { background: rgba(34,211,238,0.12); color: var(--user-color); }
+    .arch-priv.ker { background: rgba(249,115,22,0.12);  color: var(--kernel-color); }
+
+    /* protection boundary */
+    .protection-boundary {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      margin: 4px 0;
+      background: var(--surface3);
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+    }
+
+    .protection-boundary .shield {
+      font-size: 14px;
+    }
+
+    /* ─── CONTROLS ─── */
+    #ctrl-panel {
+      grid-row: 2;
+      grid-column: 2;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    .syscall-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .syscall-btn {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transition: border-color 0.2s, background 0.2s, transform 0.1s;
+      text-align: left;
+    }
+
+    .syscall-btn:hover {
+      background: var(--surface3);
+      border-color: var(--user-color);
+    }
+
+    .syscall-btn:active { transform: scale(0.98); }
+
+    .syscall-btn.running {
+      border-color: var(--warn);
+      background: rgba(250,204,21,0.05);
+    }
+
+    .syscall-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+
+    .syscall-icon.io    { background: rgba(34,211,238,0.12); }
+    .syscall-icon.mem   { background: rgba(168,85,247,0.12); }
+    .syscall-icon.proc  { background: rgba(74,222,128,0.12); }
+    .syscall-icon.net   { background: rgba(249,115,22,0.12); }
+
+    .syscall-meta { flex: 1; }
+    .syscall-name { font-size: 12px; font-weight: 600; color: var(--text); }
+    .syscall-num  { font-size: 10px; color: var(--text-muted); }
+
+    .syscall-arrow {
+      font-size: 10px;
+      color: var(--text-dim);
+    }
+
+    /* manual buttons */
+    .action-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      cursor: pointer;
+      border: 1px solid;
+      transition: background 0.2s, box-shadow 0.2s, transform 0.1s;
+    }
+
+    .btn:active { transform: scale(0.97); }
+
+    .btn-user {
+      background: rgba(34,211,238,0.08);
+      border-color: var(--user-color);
+      color: var(--user-color);
+    }
+
+    .btn-user:hover { background: rgba(34,211,238,0.18); box-shadow: 0 0 10px rgba(34,211,238,0.15); }
+
+    .btn-kernel {
+      background: rgba(249,115,22,0.08);
+      border-color: var(--kernel-color);
+      color: var(--kernel-color);
+    }
+
+    .btn-kernel:hover { background: rgba(249,115,22,0.18); box-shadow: 0 0 10px rgba(249,115,22,0.15); }
+
+    .btn-reset {
+      background: transparent;
+      border-color: var(--border);
+      color: var(--text-muted);
+      flex: none;
+      padding: 8px 10px;
+    }
+
+    .btn-reset:hover { border-color: var(--error); color: var(--error); }
+
+    /* hardware protection demo */
+    .hw-demo {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .hw-demo-title {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .hw-regs {
+      padding: 10px 12px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+
+    .hw-reg {
+      background: var(--surface3);
+      border-radius: 5px;
+      padding: 6px 10px;
+    }
+
+    .hw-reg-label {
+      font-family: var(--mono);
+      font-size: 9px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+
+    .hw-reg-val {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text);
+      margin-top: 2px;
+      transition: color 0.3s;
+    }
+
+    .hw-reg-val.changed { color: var(--warn); }
+
+    /* ─── JOURNAL / LOG ─── */
+    #log-panel {
+      grid-column: 1 / -1;
+      grid-row: 3;
+      max-height: 220px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .log-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.75rem 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .log-scroll::-webkit-scrollbar { width: 4px; }
+    .log-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .log-entry {
+      font-family: var(--mono);
+      font-size: 12px;
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      opacity: 0;
+      transform: translateY(4px);
+      animation: fade-in 0.25s forwards;
+    }
+
+    @keyframes fade-in {
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .log-time {
+      color: var(--text-dim);
+      min-width: 60px;
+      font-size: 10px;
+    }
+
+    .log-level {
+      min-width: 56px;
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 2px;
+      font-weight: 600;
+    }
+
+    .log-level.syscall { background: rgba(34,211,238,0.12); color: var(--user-color); }
+    .log-level.kernel  { background: rgba(249,115,22,0.12);  color: var(--kernel-color); }
+    .log-level.trap    { background: rgba(250,204,21,0.12);  color: var(--warn); }
+    .log-level.ret     { background: rgba(74,222,128,0.12);  color: var(--success); }
+    .log-level.fault   { background: rgba(248,113,113,0.12); color: var(--error); }
+    .log-level.info    { background: rgba(100,116,139,0.12); color: var(--text-muted); }
+
+    .log-msg { color: var(--text); flex: 1; }
+
+    /* ─── transition animation overlay ─── */
+    #transition-overlay {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 500;
+      opacity: 0;
+      transition: opacity 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #transition-overlay.flash {
+      animation: mode-flash 0.6s ease;
+    }
+
+    @keyframes mode-flash {
+      0%   { opacity: 0; }
+      20%  { opacity: 1; }
+      100% { opacity: 0; }
+    }
+
+    #transition-overlay .flash-text {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      padding: 6px 16px;
+      border-radius: 4px;
+      border: 1px solid;
+    }
+
+    #transition-overlay.to-kernel .flash-text {
+      background: rgba(249,115,22,0.2);
+      border-color: var(--kernel-color);
+      color: var(--kernel-color);
+      text-shadow: 0 0 12px var(--kernel-color);
+    }
+
+    #transition-overlay.to-user .flash-text {
+      background: rgba(34,211,238,0.2);
+      border-color: var(--user-color);
+      color: var(--user-color);
+      text-shadow: 0 0 12px var(--user-color);
+    }
+
+    /* ─── status bar ─── */
+    .status-bar {
+      grid-column: 1 / -1;
+      background: var(--surface2);
+      border-top: 1px solid var(--border);
+      padding: 6px 1.5rem;
+      display: flex;
+      gap: 1.5rem;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .status-item { display: flex; gap: 6px; align-items: center; }
+    .status-dot  { width: 6px; height: 6px; border-radius: 50%; }
+
+    /* access-denied flash */
+    .fault-flash {
+      border: 1px solid var(--error) !important;
+      box-shadow: 0 0 16px rgba(248,113,113,0.3) !important;
+    }
+
+    /* ─── responsive ─── */
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      #ctrl-panel { grid-row: 3; grid-column: 1; }
+      #log-panel  { grid-row: 4; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1><span class="user-hl">User</span> / <span class="kern-hl">Kernel</span> Mode Simulator</h1>
+    <div class="subtitle">Hardware Protection &amp; Privilege-Level Switching · OS Fundamentals</div>
+  </div>
+  <span class="header-badge">x86-64 Ring Model</span>
+  <span class="header-badge">CPL / RPL / DPL</span>
+  <span class="header-badge">IDT · GDT · TSS</span>
+</header>
+
+<!-- transition flash overlay -->
+<div id="transition-overlay"><span class="flash-text" id="flash-msg"></span></div>
+
+<div class="layout">
+
+  <!-- ── MODE STRIP ── -->
+  <div class="mode-strip">
+    <div class="mode-half active-user" id="user-half">
+      <div class="mode-dot user lit" id="dot-user"></div>
+      <div>
+        <div class="mode-label user">User Mode</div>
+        <div class="mode-desc">Restricted execution environment</div>
+      </div>
+      <span class="mode-ring-3">CPL = Ring 3</span>
+    </div>
+
+    <div class="mode-arrow" id="mode-arrow">⇆</div>
+
+    <div class="mode-half inactive" id="kernel-half">
+      <span class="mode-ring-0">CPL = Ring 0</span>
+      <div>
+        <div class="mode-label kernel">Kernel Mode</div>
+        <div class="mode-desc">Full hardware access enabled</div>
+      </div>
+      <div class="mode-dot kernel" id="dot-kernel"></div>
+    </div>
+  </div>
+
+  <!-- ── ARCHITECTURE VISUALIZATION ── -->
+  <div class="panel" id="vis-panel">
+    <div class="panel-title">Protection Ring Architecture</div>
+    <div class="arch-container" id="arch-container">
+
+      <div class="arch-layer user-layer" id="layer-app" data-mode="user">
+        <div class="arch-icon">🖥</div>
+        <div class="arch-name">Application Process</div>
+        <div class="arch-desc">User code · virtual address space · restricted instructions</div>
+        <span class="arch-priv usr">Ring 3</span>
+      </div>
+
+      <div class="arch-layer user-layer" id="layer-lib" data-mode="user">
+        <div class="arch-icon">📦</div>
+        <div class="arch-name">C Library (libc)</div>
+        <div class="arch-desc">Wrappers around syscall instruction — still Ring 3</div>
+        <span class="arch-priv usr">Ring 3</span>
+      </div>
+
+      <div class="protection-boundary" id="protection-boundary">
+        <span class="shield">🛡</span>
+        <span id="boundary-label">PROTECTION BOUNDARY — SYSCALL / SYSRET — CPL SWITCHES HERE</span>
+      </div>
+
+      <div class="arch-layer kernel-layer" id="layer-syscall" data-mode="kernel">
+        <div class="arch-icon">⚙</div>
+        <div class="arch-name">Syscall Dispatcher</div>
+        <div class="arch-desc">IDT/LSTAR · save state · dispatch to handler</div>
+        <span class="arch-priv ker">Ring 0</span>
+      </div>
+
+      <div class="arch-layer kernel-layer" id="layer-subsys" data-mode="kernel">
+        <div class="arch-icon">🗂</div>
+        <div class="arch-name">Kernel Subsystem</div>
+        <div class="arch-desc">VFS / Memory / Scheduler / Network stack</div>
+        <span class="arch-priv ker">Ring 0</span>
+      </div>
+
+      <div class="arch-layer kernel-layer" id="layer-driver" data-mode="kernel">
+        <div class="arch-icon">🔌</div>
+        <div class="arch-name">Device Drivers</div>
+        <div class="arch-desc">I/O port access · DMA · hardware registers</div>
+        <span class="arch-priv ker">Ring 0</span>
+      </div>
+
+      <div class="arch-layer kernel-layer" id="layer-hw" data-mode="kernel">
+        <div class="arch-icon">💾</div>
+        <div class="arch-name">Hardware (CPU / RAM / I/O)</div>
+        <div class="arch-desc">Physical resources · direct register access</div>
+        <span class="arch-priv ker">Ring 0</span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── CONTROLS ── -->
+  <div class="panel" id="ctrl-panel">
+
+    <div class="panel-title">System Calls</div>
+    <div class="syscall-list" id="syscall-list">
+
+      <button class="syscall-btn" onclick="triggerSyscall('read',1)">
+        <div class="syscall-icon io">📂</div>
+        <div class="syscall-meta">
+          <div class="syscall-name">read()</div>
+          <div class="syscall-num">NR_read = 0</div>
+        </div>
+        <span class="syscall-arrow">▶</span>
+      </button>
+
+      <button class="syscall-btn" onclick="triggerSyscall('write',4)">
+        <div class="syscall-icon io">✏</div>
+        <div class="syscall-meta">
+          <div class="syscall-name">write()</div>
+          <div class="syscall-num">NR_write = 1</div>
+        </div>
+        <span class="syscall-arrow">▶</span>
+      </button>
+
+      <button class="syscall-btn" onclick="triggerSyscall('mmap',6)">
+        <div class="syscall-icon mem">🗺</div>
+        <div class="syscall-meta">
+          <div class="syscall-name">mmap()</div>
+          <div class="syscall-num">NR_mmap = 9</div>
+        </div>
+        <span class="syscall-arrow">▶</span>
+      </button>
+
+      <button class="syscall-btn" onclick="triggerSyscall('fork',5)">
+        <div class="syscall-icon proc">🌿</div>
+        <div class="syscall-meta">
+          <div class="syscall-name">fork()</div>
+          <div class="syscall-num">NR_fork = 57</div>
+        </div>
+        <span class="syscall-arrow">▶</span>
+      </button>
+
+      <button class="syscall-btn" onclick="triggerSyscall('socket',4)">
+        <div class="syscall-icon net">🌐</div>
+        <div class="syscall-meta">
+          <div class="syscall-name">socket()</div>
+          <div class="syscall-num">NR_socket = 41</div>
+        </div>
+        <span class="syscall-arrow">▶</span>
+      </button>
+
+      <button class="syscall-btn" onclick="triggerFault()">
+        <div class="syscall-icon net" style="background:rgba(248,113,113,0.12)">⛔</div>
+        <div class="syscall-meta">
+          <div class="syscall-name" style="color:var(--error)">Illegal Privilege Access</div>
+          <div class="syscall-num">IN port 0x60 (kbd) from Ring 3</div>
+        </div>
+        <span class="syscall-arrow">▶</span>
+      </button>
+
+    </div>
+
+    <div class="action-row" style="margin-top:0.75rem">
+      <button class="btn btn-user"   onclick="manualSwitch('user')">→ User</button>
+      <button class="btn btn-kernel" onclick="manualSwitch('kernel')">→ Kernel</button>
+      <button class="btn btn-reset"  onclick="resetSim()" title="Reset">↺</button>
+    </div>
+
+    <!-- HW registers -->
+    <div class="hw-demo" style="margin-top:0.75rem">
+      <div class="hw-demo-title">⬡ CPU Registers (live)</div>
+      <div class="hw-regs">
+        <div class="hw-reg">
+          <div class="hw-reg-label">CPL (Current Priv Level)</div>
+          <div class="hw-reg-val" id="reg-cpl">3</div>
+        </div>
+        <div class="hw-reg">
+          <div class="hw-reg-label">CS Selector</div>
+          <div class="hw-reg-val" id="reg-cs">0x0033</div>
+        </div>
+        <div class="hw-reg">
+          <div class="hw-reg-label">EFLAGS.IOPL</div>
+          <div class="hw-reg-val" id="reg-iopl">0x0</div>
+        </div>
+        <div class="hw-reg">
+          <div class="hw-reg-label">CR0.PE</div>
+          <div class="hw-reg-val" id="reg-cr0">1</div>
+        </div>
+        <div class="hw-reg">
+          <div class="hw-reg-label">LSTAR (syscall target)</div>
+          <div class="hw-reg-val" id="reg-lstar" style="font-size:10px">0xffffffff81600000</div>
+        </div>
+        <div class="hw-reg">
+          <div class="hw-reg-label">Syscall counter</div>
+          <div class="hw-reg-val" id="reg-sc">0</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── LOG ── -->
+  <div class="panel" id="log-panel">
+    <div class="panel-title">Event Journal</div>
+    <div class="log-scroll" id="log"></div>
+  </div>
+
+  <!-- ── STATUS BAR ── -->
+  <div class="status-bar">
+    <div class="status-item">
+      <div class="status-dot" id="sb-dot" style="background:var(--user-color)"></div>
+      <span id="sb-mode">USER MODE</span>
+    </div>
+    <div class="status-item">Switches: <span id="sb-switches">0</span></div>
+    <div class="status-item">Faults: <span id="sb-faults">0</span></div>
+    <div class="status-item">Elapsed: <span id="sb-elapsed">0.0s</span></div>
+    <div class="status-item" style="margin-left:auto;color:var(--text-dim)">
+      Protection: SEGV · GPF · Page-Fault · I/O Permission
+    </div>
+  </div>
+
+</div><!-- /layout -->
+
+<script>
+  // ─── State ───────────────────────────────────────────────────────────────
+  let state = {
+    mode: 'user',
+    switches: 0,
+    faults: 0,
+    syscallCount: 0,
+    busy: false,
+    startTime: Date.now()
+  };
+
+  const LAYERS = {
+    user:   ['layer-app', 'layer-lib'],
+    kernel: ['layer-syscall', 'layer-subsys', 'layer-driver', 'layer-hw']
+  };
+
+  // ─── Utilities ───────────────────────────────────────────────────────────
+  function ts() {
+    const ms = Date.now() - state.startTime;
+    return (ms / 1000).toFixed(3);
+  }
+
+  function addLog(level, msg) {
+    const el = document.getElementById('log');
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    entry.innerHTML = `
+      <span class="log-time">${ts()}s</span>
+      <span class="log-level ${level}">${level.toUpperCase()}</span>
+      <span class="log-msg">${msg}</span>`;
+    el.appendChild(entry);
+    el.scrollTop = el.scrollHeight;
+    // keep log bounded
+    while (el.children.length > 120) el.removeChild(el.firstChild);
+  }
+
+  function flashReg(id) {
+    const el = document.getElementById(id);
+    el.classList.add('changed');
+    setTimeout(() => el.classList.remove('changed'), 1200);
+  }
+
+  function setReg(id, val) {
+    document.getElementById(id).textContent = val;
+    flashReg(id);
+  }
+
+  function updateStatusBar() {
+    const dot = document.getElementById('sb-dot');
+    dot.style.background = state.mode === 'user' ? 'var(--user-color)' : 'var(--kernel-color)';
+    document.getElementById('sb-mode').textContent = state.mode.toUpperCase() + ' MODE';
+    document.getElementById('sb-switches').textContent = state.switches;
+    document.getElementById('sb-faults').textContent   = state.faults;
+  }
+
+  // ─── Architecture layers ─────────────────────────────────────────────────
+  function highlightLayers(mode) {
+    // deactivate all
+    document.querySelectorAll('.arch-layer').forEach(l => l.classList.remove('active'));
+    // activate for mode
+    LAYERS[mode].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.add('active');
+    });
+  }
+
+  function highlightSingleLayer(id) {
+    document.querySelectorAll('.arch-layer').forEach(l => l.classList.remove('active'));
+    const el = document.getElementById(id);
+    if (el) el.classList.add('active');
+  }
+
+  // ─── Mode switching ───────────────────────────────────────────────────────
+  function applyMode(mode) {
+    state.mode = mode;
+    const isKernel = mode === 'kernel';
+
+    // dots
+    document.getElementById('dot-user').classList.toggle('lit', !isKernel);
+    document.getElementById('dot-kernel').classList.toggle('lit', isKernel);
+
+    // halves
+    document.getElementById('user-half').className   = 'mode-half ' + (isKernel ? 'inactive' : 'active-user');
+    document.getElementById('kernel-half').className = 'mode-half ' + (isKernel ? 'active-kernel' : 'inactive');
+
+    // layers
+    highlightLayers(mode);
+
+    // registers
+    setReg('reg-cpl', isKernel ? '0' : '3');
+    setReg('reg-cs',  isKernel ? '0x0010' : '0x0033');
+    setReg('reg-iopl', isKernel ? '0x3' : '0x0');
+
+    // boundary label
+    document.getElementById('boundary-label').textContent =
+      isKernel
+        ? 'IN KERNEL — PRIVILEGE BOUNDARY CROSSED — FULL HW ACCESS'
+        : 'PROTECTION BOUNDARY — SYSCALL / SYSRET — CPL SWITCHES HERE';
+
+    updateStatusBar();
+  }
+
+  function flashTransition(toMode) {
+    const ov = document.getElementById('transition-overlay');
+    const msg = document.getElementById('flash-msg');
+    ov.className = 'to-' + toMode;
+    msg.textContent = toMode === 'kernel' ? '⬇ TRAP → RING 0' : '⬆ SYSRET → RING 3';
+    // restart animation
+    ov.style.animation = 'none';
+    void ov.offsetWidth;
+    ov.style.animation = '';
+    ov.classList.add('flash');
+    setTimeout(() => ov.classList.remove('flash'), 650);
+  }
+
+  function switchMode(toMode) {
+    if (state.mode === toMode) return;
+    state.switches++;
+    flashTransition(toMode);
+    applyMode(toMode);
+  }
+
+  function manualSwitch(mode) {
+    if (state.busy) return;
+    const from = state.mode;
+    if (from === mode) {
+      addLog('info', `Already in ${mode.toUpperCase()} mode — no switch needed`);
+      return;
+    }
+    if (mode === 'kernel') {
+      addLog('trap', 'Manual SYSCALL instruction issued — CPL: 3 → 0');
+    } else {
+      addLog('ret', 'Manual SYSRET instruction issued — CPL: 0 → 3');
+    }
+    switchMode(mode);
+    addLog('info', `Mode is now ${mode.toUpperCase()} · switches total: ${state.switches}`);
+  }
+
+  // ─── Syscall simulation ───────────────────────────────────────────────────
+  const SYSCALL_STEPS = {
+    read:   ['layer-lib','layer-syscall','layer-subsys','layer-driver','layer-hw','layer-subsys','layer-syscall','layer-lib','layer-app'],
+    write:  ['layer-lib','layer-syscall','layer-subsys','layer-driver','layer-hw','layer-subsys','layer-syscall','layer-lib','layer-app'],
+    mmap:   ['layer-lib','layer-syscall','layer-subsys','layer-hw','layer-subsys','layer-syscall','layer-app'],
+    fork:   ['layer-lib','layer-syscall','layer-subsys','layer-syscall','layer-app'],
+    socket: ['layer-lib','layer-syscall','layer-subsys','layer-driver','layer-syscall','layer-app'],
+  };
+
+  const SYSCALL_EVENTS = {
+    read: [
+      ['syscall','read() called — libc wrapper sets rax=0, args in rdi/rsi/rdx'],
+      ['trap',   'SYSCALL instruction → CPL 3→0, save rip/rsp/rflags to TSS'],
+      ['kernel', 'sys_read() dispatcher → VFS layer lookup → inode resolve'],
+      ['kernel', 'Block driver I/O request queued → DMA transfer initiated'],
+      ['kernel', 'Hardware interrupt: DMA complete → data in kernel buffer'],
+      ['kernel', 'copy_to_user() — kernel→user buffer transfer (page-walk)'],
+      ['ret',    'SYSRET → CPL 0→3, restore rip/rsp from TSS'],
+      ['ret',    'read() returns bytes_read in rax — back in user space'],
+    ],
+    write: [
+      ['syscall','write() — libc sets rax=1'],
+      ['trap',   'SYSCALL → CPL 3→0'],
+      ['kernel', 'sys_write() → VFS → file_operations.write'],
+      ['kernel', 'copy_from_user() — user buffer → kernel page cache'],
+      ['kernel', 'Page-cache dirty; pdflush may schedule writeback'],
+      ['ret',    'SYSRET → CPL 0→3, return bytes_written'],
+    ],
+    mmap: [
+      ['syscall','mmap() — rax=9, flags MAP_ANONYMOUS|MAP_PRIVATE'],
+      ['trap',   'SYSCALL → CPL 3→0'],
+      ['kernel', 'do_mmap() — allocate vm_area_struct in task mm_struct'],
+      ['kernel', 'PTE entries marked demand-paged (not yet backed)'],
+      ['ret',    'SYSRET → CPL 0→3, return virtual address'],
+    ],
+    fork: [
+      ['syscall','fork() — rax=57'],
+      ['trap',   'SYSCALL → CPL 3→0'],
+      ['kernel', 'copy_process() — duplicate task_struct, mm, fds'],
+      ['kernel', 'COW page tables set; child added to run queue'],
+      ['ret',    'SYSRET × 2 — parent gets child PID, child gets 0'],
+    ],
+    socket: [
+      ['syscall','socket(AF_INET, SOCK_STREAM, 0) — rax=41'],
+      ['trap',   'SYSCALL → CPL 3→0'],
+      ['kernel', 'sock_create() → inet_create() → TCP sock init'],
+      ['kernel', 'alloc fd, install socket file-object in fdtable'],
+      ['ret',    'SYSRET → CPL 0→3, return fd integer'],
+    ],
+  };
+
+  function triggerSyscall(name, durationSteps) {
+    if (state.busy) return;
+    state.busy = true;
+    state.syscallCount++;
+    setReg('reg-sc', state.syscallCount);
+
+    // disable buttons
+    document.querySelectorAll('.syscall-btn').forEach(b => b.disabled = true);
+
+    const events  = SYSCALL_EVENTS[name];
+    const steps   = SYSCALL_STEPS[name];
+    const stepMs  = 420;
+
+    addLog('info', `─── syscall ${name}() initiated ───`);
+
+    // run through steps
+    let i = 0;
+    let logIdx = 0;
+
+    function tick() {
+      if (i >= steps.length) {
+        // done
+        highlightLayers('user');
+        applyMode('user');
+        addLog('info', `─── ${name}() complete · returned to Ring 3 ───`);
+        state.busy = false;
+        document.querySelectorAll('.syscall-btn').forEach(b => b.disabled = false);
+        return;
+      }
+
+      const layerId = steps[i];
+      highlightSingleLayer(layerId);
+
+      // determine mode from layer
+      const layer = document.getElementById(layerId);
+      const modeNeeded = layer && layer.dataset.mode;
+
+      if (modeNeeded && modeNeeded !== state.mode) {
+        switchMode(modeNeeded);
+      }
+
+      // log event if available
+      if (logIdx < events.length) {
+        const [lvl, msg] = events[logIdx];
+        addLog(lvl, msg);
+        logIdx++;
+      }
+
+      i++;
+      setTimeout(tick, stepMs);
+    }
+
+    tick();
+  }
+
+  // ─── Fault simulation ─────────────────────────────────────────────────────
+  function triggerFault() {
+    if (state.busy) return;
+    state.faults++;
+    state.busy = true;
+    document.querySelectorAll('.syscall-btn').forEach(b => b.disabled = true);
+
+    addLog('fault', 'User-mode code executing IN instruction (port 0x60)');
+    highlightSingleLayer('layer-app');
+
+    setTimeout(() => {
+      addLog('fault', 'CPL=3 — IOPL check fails (EFLAGS.IOPL=0x0 < CPL=3)');
+      // flash boundary red
+      const boundary = document.getElementById('protection-boundary');
+      boundary.classList.add('fault-flash');
+
+      setTimeout(() => {
+        addLog('fault', '#GP(0) General Protection Fault raised by CPU');
+        addLog('fault', 'IDT entry 13 → kernel GPF handler dispatched');
+        addLog('fault', 'Process receives SIGSEGV — terminated');
+        boundary.classList.remove('fault-flash');
+        document.getElementById('sb-faults').textContent = state.faults;
+
+        state.busy = false;
+        document.querySelectorAll('.syscall-btn').forEach(b => b.disabled = false);
+        highlightLayers(state.mode);
+      }, 900);
+    }, 500);
+  }
+
+  // ─── Reset ────────────────────────────────────────────────────────────────
+  function resetSim() {
+    state = { mode: 'user', switches: 0, faults: 0, syscallCount: 0, busy: false, startTime: Date.now() };
+    document.getElementById('log').innerHTML = '';
+    applyMode('user');
+    setReg('reg-sc', '0');
+    document.querySelectorAll('.syscall-btn').forEach(b => b.disabled = false);
+    addLog('info', 'Simulator reset — process in Ring 3 user space');
+  }
+
+  // ─── Elapsed timer ────────────────────────────────────────────────────────
+  setInterval(() => {
+    document.getElementById('sb-elapsed').textContent =
+      ((Date.now() - state.startTime) / 1000).toFixed(1) + 's';
+  }, 100);
+
+  // ─── Boot ─────────────────────────────────────────────────────────────────
+  applyMode('user');
+  addLog('info', 'Simulator initialised — CPU in protected mode (CR0.PE=1)');
+  addLog('info', 'LSTAR MSR loaded — syscall entry at 0xffffffff81600000');
+  addLog('info', 'GDT/IDT configured · TSS loaded · SMEP/SMAP active');
+  addLog('info', 'Process spawned in Ring 3 user space — awaiting syscall');
+</script>
+</body>
+</html>
